@@ -20,15 +20,15 @@ static camera_config_t camera_config = {
     .pin_href = 7,
     .pin_pclk = 13,
 
-    .xclk_freq_hz = 20971520,//EXPERIMENTAL: Set to 16MHz on ESP32-S2 or ESP32-S3 to enable EDMA mode
+    .xclk_freq_hz = 20000000,//EXPERIMENTAL: Set to 16MHz on ESP32-S2 or ESP32-S3 to enable EDMA mode
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
 
-    .pixel_format = PIXFORMAT_JPEG,//YUV422,GRAYSCALE,RGB565,JPEG
-    .frame_size = FRAMESIZE_VGA,//QQVGA-UXGA, For ESP32, do not use sizes above QVGA when not JPEG. The performance of the ESP32-S series has improved a lot, but JPEG mode always gives better frame rates.
+    .pixel_format = PIXFORMAT_GRAYSCALE,//YUV422,GRAYSCALE,RGB565,JPEG
+    .frame_size = FRAMESIZE_96X96,//QQVGA-UXGA, For ESP32, do not use sizes above QVGA when not JPEG. The performance of the ESP32-S series has improved a lot, but JPEG mode always gives better frame rates.
 
     .jpeg_quality = 31, //0-63, for OV series camera sensors, lower number means higher quality
-    .fb_count = 2, //When jpeg mode is used, if fb_count more than one, the driver will work in continuous mode.
+    .fb_count = 1, //When jpeg mode is used, if fb_count more than one, the driver will work in continuous mode.
     .fb_location = CAMERA_FB_IN_PSRAM,
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY, //CAMERA_GRAB_WHEN_EMPTY or CAMERA_GRAB_LATEST. Sets when buffers should be filled
 };
@@ -52,8 +52,17 @@ esp_err_t camera_capture(){
         return ESP_FAIL;
     }
     //replace this with your own function
-    printf("W: %d, H: %d\n", fb->width, fb->height);
-  
+    printf("W: %d, H: %d, F: %d\n", fb->width, fb->height, fb->format);
+
+    int image_size = 96 * 96 * 1;
+    uint8_t* image_data = (uint8_t*)malloc(image_size);
+    memcpy(fb->buf, image_data, image_size);
+    printf("\nImage:\n");
+    for (int i = 1; i <= image_size; i++) {
+      printf("%d, ", image_data[i - 1]);
+    }
+    printf("\n");
+
     //return the frame buffer back to the driver for reuse
     esp_camera_fb_return(fb);
     return ESP_OK;
@@ -65,11 +74,11 @@ void setup() {
   printf("Camera Init\n");
   camera_init();
   delay(3000);
-  printf("Camera Capture\n");
-  camera_capture();
-  printf("End\n");
 }
 
 void loop() {
+  printf("Camera Capture\n");
+  camera_capture();
+
   delay(30000);
 }
