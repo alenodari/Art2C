@@ -1,84 +1,122 @@
 #include <Arduino.h>
-#include "esp_camera.h"
+#include <SPIFFS.h>
+#include <SD_MMC.h>
+#include <esp_timer.h>
 
-static camera_config_t camera_config = {
-    .pin_pwdn  = -1,
-    .pin_reset = -1,
-    .pin_xclk = 15,
-    .pin_sccb_sda = 4,
-    .pin_sccb_scl = 5,
+#include "screen.h"
+#include "camera.h"
+#include "sdcard.h"
+#include "test.h"
 
-    .pin_d7 = 16,
-    .pin_d6 = 17,
-    .pin_d5 = 18,
-    .pin_d4 = 12,
-    .pin_d3 = 10,
-    .pin_d2 = 8,
-    .pin_d1 = 9,
-    .pin_d0 = 11,
-    .pin_vsync = 6,
-    .pin_href = 7,
-    .pin_pclk = 13,
-
-    .xclk_freq_hz = 20000000,//EXPERIMENTAL: Set to 16MHz on ESP32-S2 or ESP32-S3 to enable EDMA mode
-    .ledc_timer = LEDC_TIMER_0,
-    .ledc_channel = LEDC_CHANNEL_0,
-
-    .pixel_format = PIXFORMAT_GRAYSCALE,//YUV422,GRAYSCALE,RGB565,JPEG
-    .frame_size = FRAMESIZE_96X96,//QQVGA-UXGA, For ESP32, do not use sizes above QVGA when not JPEG. The performance of the ESP32-S series has improved a lot, but JPEG mode always gives better frame rates.
-
-    .jpeg_quality = 31, //0-63, for OV series camera sensors, lower number means higher quality
-    .fb_count = 1, //When jpeg mode is used, if fb_count more than one, the driver will work in continuous mode.
-    .fb_location = CAMERA_FB_IN_PSRAM,
-    .grab_mode = CAMERA_GRAB_WHEN_EMPTY, //CAMERA_GRAB_WHEN_EMPTY or CAMERA_GRAB_LATEST. Sets when buffers should be filled
-};
-
-esp_err_t camera_init(){
-    //initialize the camera
-    esp_err_t err = esp_camera_init(&camera_config);
-    if (err != ESP_OK) {
-        printf("Camera Init Failed\n");
-        return err;
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t camera_capture(){
-    //acquire a frame
-    camera_fb_t * fb = esp_camera_fb_get();
-    if (!fb) {
-        printf("Camera Capture Failed\n");
-        return ESP_FAIL;
-    }
-    //replace this with your own function
-    printf("W: %d, H: %d, F: %d\n", fb->width, fb->height, fb->format);
-
-    int image_size = 96 * 96 * 1;
-    uint8_t* image_data = (uint8_t*)malloc(image_size);
-    memcpy(fb->buf, image_data, image_size);
-    printf("\nImage:\n");
-    for (int i = 1; i <= image_size; i++) {
-      printf("%d, ", image_data[i - 1]);
-    }
-    printf("\n");
-
-    //return the frame buffer back to the driver for reuse
-    esp_camera_fb_return(fb);
-    return ESP_OK;
+void print_available_memory() {
+  printf("\nMemory Heap: (%d/%d) and PSRAM: (%d/%d) and SPIFFS: (%d/%d)\n\n", ESP.getFreeHeap(), ESP.getHeapSize(), ESP.getFreePsram(), ESP.getPsramSize(), SPIFFS.usedBytes(), SPIFFS.totalBytes());
 }
 
 void setup() {
   delay(3000);
   Serial.begin(115200);
-  printf("Camera Init\n");
-  camera_init();
+  SPIFFS.begin();
+  print_available_memory();
+
   delay(3000);
+  esp_err_t screen_init_ok = screen_init();
+  if (screen_init_ok != ESP_OK)
+    printf("Screen Failed\n");
+  esp_err_t camera_init_ok = camera_init();
+  if (camera_init_ok != ESP_OK)
+    printf("Camera Failed\n");
+  if (!sd_card_init())
+    printf("SD Card Failed\n");
+  print_available_memory();
+
+  // test_init();
+}
+
+void resize_image_to_display(uint16_t *inputImage, int input_width, int input_height, uint16_t *outputImage, int output_width, int output_height) {
+  if (!inputImage || !outputImage) return;
+
+  int scale_factor_x = input_width / output_width;
+  int scale_factor_y = input_height / output_height;
+
+  for (int output_row = 0; output_row < output_height; output_row++) {
+    for (int output_column = 0; output_column < output_width; output_column++) {
+      int original_column = output_column * scale_factor_x;
+      int original_row = output_row * scale_factor_y;
+
+      int avg_r = 0, avg_g = 0, avg_b = 0;
+
+      for (int row_index = 0; row_index < scale_factor_y; row_index++) {
+        for (int column_index = 0; column_index < scale_factor_x; column_index++) {
+          int column = original_column + column_index;
+          int row = original_row + row_index;
+
+          if (column >= input_width || row >= input_height) continue;
+
+          uint16_t pixel = inputImage[row * input_width + column];
+          int r = (pixel >> 11) & 0x1F;
+          int g = (pixel >> 5) & 0x3F;
+          int b = pixel & 0x1F;
+
+          avg_r += r;
+          avg_g += g;
+          avg_b += b;
+        }
+      }
+
+      avg_r /= scale_factor_x * scale_factor_y;
+      avg_g /= scale_factor_x * scale_factor_y;
+      avg_b /= scale_factor_x * scale_factor_y;
+
+      outputImage[output_row * output_width + output_column] = (uint16_t)((avg_r << 11) & 0xF800) | ((avg_g << 5) & 0x07E0) | (avg_b & 0x001F);
+    }
+  }
+}
+
+void crop_image_to_display(uint8_t *inputImage, int input_width, int input_height, uint8_t *outputImage, int output_width, int output_height) {
+  int initial_column = (input_width - output_width) / 2;
+  int initial_row = (input_height - output_height) / 2;
+
+  int output_column = 0, output_row = 0;
+  for (int input_row = initial_row; input_row < (initial_row + output_height); input_row++) {
+    for (int input_column = initial_column; input_column < (initial_column + output_width); input_column++) {
+      int input_position = (input_row * input_width + input_column) * 2;
+      int output_position = (output_row * output_width + output_column) * 2;
+      outputImage[output_position] = inputImage[input_position];
+      outputImage[output_position + 1] = inputImage[input_position + 1];
+      output_column++;
+    }
+    output_row++;
+  }
 }
 
 void loop() {
-  printf("Camera Capture\n");
-  camera_capture();
+  uint8_t *capture_image = (uint8_t *)malloc(640 * 480 * 2);
+  uint8_t *display_image = (uint8_t *)malloc(240 * 240 * 2);
+  char image_file_name[30];
 
-  delay(30000);
+  for (int image_index = 0; image_index < 10; image_index++)
+  {
+    snprintf(image_file_name, 30, "/image%02d.565", image_index);
+    esp_err_t camera_capture_ok = camera_capture(capture_image);
+    // delay(3000);
+    if (camera_capture_ok != ESP_OK)
+    {
+      printf("Camera Capture Failed\n");
+    }
+    else
+    {
+      // writeFile(SD_MMC, image_file_name, capture_image, (640 * 480 * 2));
+      printf("Screen Drawing %02d\n", image_index);
+      crop_image_to_display(capture_image, 640, 480, display_image, 240, 240);
+      screen_draw_bitmap(0, 0, 240, 240, (uint16_t*)display_image);
+      delay(3000);
+    }
+  }
+
+  free(capture_image);
+  free(display_image);
+
+  // test();
+
+  delay(60000);
 }
